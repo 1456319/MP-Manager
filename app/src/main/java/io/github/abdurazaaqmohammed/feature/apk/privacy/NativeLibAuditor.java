@@ -43,8 +43,10 @@ public final class NativeLibAuditor {
             String name = source.getName();
             if (!name.startsWith("lib/") || !name.endsWith(".so")) continue;
 
+            report.totalNativeLibsFound++;
             try (InputStream is = source.openStream()) {
                 byte[] bytes = readAll(is);
+                report.totalNativeLibsScanned++;
                 String elfContent = new String(bytes, StandardCharsets.ISO_8859_1);
 
                 for (String probe : ROOT_SURVEILLANCE_STRINGS) {
@@ -60,16 +62,25 @@ public final class NativeLibAuditor {
                         ));
                     }
                 }
-            } catch (Exception ignored) {
+            } catch (Throwable t) {
+                report.totalNativeLibsFailed++;
+                report.scanWarnings.add("Could not read native library " + name + ": " + t.getMessage());
             }
         }
     }
+
+    private static final int MAX_ELF_AUDIT_BYTES = 16 * 1024 * 1024; // 16 MB max scan per native binary
 
     private static byte[] readAll(InputStream is) throws Exception {
         try (is; ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
             byte[] buf = new byte[65536];
             int n;
-            while ((n = is.read(buf)) != -1) bos.write(buf, 0, n);
+            int total = 0;
+            while ((n = is.read(buf)) != -1) {
+                bos.write(buf, 0, n);
+                total += n;
+                if (total >= MAX_ELF_AUDIT_BYTES) break;
+            }
             return bos.toByteArray();
         }
     }

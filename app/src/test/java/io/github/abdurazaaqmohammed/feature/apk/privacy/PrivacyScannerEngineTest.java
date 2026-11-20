@@ -14,11 +14,15 @@ import com.android.tools.smali.smali.SmaliOptions;
 import org.junit.Test;
 
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.FileWriter;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 /**
- * Unit tests verifying Stage 2: Semantic Privacy Scanner and Invasiveness Risk Scoring.
+ * Unit tests verifying Semantic Privacy Scanner, coverage metrics, and Invasiveness Risk Scoring.
  */
 public class PrivacyScannerEngineTest {
 
@@ -103,5 +107,148 @@ public class PrivacyScannerEngineTest {
         assertTrue("Hardware fingerprint threat missing", foundHw);
         assertTrue("Surveillance threat missing", foundSurv);
         assertTrue("Log leak threat missing", foundLog);
+    }
+
+    @Test
+    public void testStrictTrackerPrefixMatching() throws Exception {
+        String unrelatedSmali = """
+            .class public Lcom/example/studio/branching/Unrelated;
+            .super Ljava/lang/Object;
+            .source "Unrelated.java"
+
+            .method public constructor <init>()V
+                .locals 0
+                invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+                return-void
+            .end method
+            """;
+        File dexFile = assembleSmali(unrelatedSmali);
+        DexBackedDexFile dex = DexFileFactory.loadDexFile(dexFile, Opcodes.getDefault());
+        PrivacyAuditReport report = PrivacyScannerEngine.scanClasses(dex.getClasses());
+
+        assertEquals("Substring match must not falsely trigger tracker threat", 0, report.threats.size());
+        assertEquals(0, report.trackerScore);
+    }
+
+    @Test
+    public void testTrackerScoreCalibration() {
+        PrivacyAuditReport report = new PrivacyAuditReport();
+        // 7 classes belonging to a single SDK must not saturate the subscore to 100
+        for (int i = 0; i < 7; i++) {
+            report.addThreat(new DetectedThreat(
+                    DetectedThreat.Category.TRACKER_SDK,
+                    "Third-Party Telemetry SDK: appsflyer",
+                    "SDK description",
+                    "Lcom/appsflyer/internal/Class" + i + ";",
+                    "<class>",
+                    DetectedThreat.ExcisionType.MANIFEST_STRIP,
+                    false
+            ));
+        }
+        report.computeScores();
+        assertEquals("Single tracker SDK must produce calibrated score of 30, not 100", 30, report.trackerScore);
+
+        // One hardware identifier alone must produce a noticeable score
+        PrivacyAuditReport hwReport = new PrivacyAuditReport();
+        hwReport.addThreat(new DetectedThreat(
+                DetectedThreat.Category.HARDWARE_FINGERPRINT,
+                "Telephony Identifier Read (getDeviceId)",
+                "Queries IMEI",
+                "Lcom/example/App;",
+                "query",
+                DetectedThreat.ExcisionType.BLANK_RETURN_STRING,
+                false
+        ));
+        hwReport.computeScores();
+        assertEquals(50, hwReport.hardwareScore);
+        assertEquals(18, hwReport.overallScore);
+    }
+
+    @Test
+    public void testStringRegisterInvalidation() throws Exception {
+        String overwriteSmali = """
+            .class public Lcom/example/RegOverwrite;
+            .super Ljava/lang/Object;
+            .source "RegOverwrite.java"
+
+            .method public static check(Landroid/content/ContentResolver;Ljava/lang/String;)V
+                .locals 2
+                const-string v1, "adb_enabled"
+                move-object v1, p1
+                invoke-static {p0, v1}, Landroid/provider/Settings$Global;->getInt(Landroid/content/ContentResolver;Ljava/lang/String;)I
+                return-void
+            .end method
+            """;
+        File dexFile = assembleSmali(overwriteSmali);
+        DexBackedDexFile dex = DexFileFactory.loadDexFile(dexFile, Opcodes.getDefault());
+        PrivacyAuditReport report = PrivacyScannerEngine.scanClasses(dex.getClasses());
+
+        // Since v1 was overwritten before invocation, it must not match "adb_enabled"
+        assertEquals("Overwritten register must not match stale adb_enabled string", 0, report.threats.size());
+    }
+
+    @Test
+    public void testCoverageMetricsAndResilience() throws Exception {
+        File apkFile = File.createTempFile("coverage_test", ".apk");
+        try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(apkFile))) {
+            // 1. Valid DEX
+            File dex1 = assembleSmali(INVASIVE_APP_SMALI);
+            zos.putNextEntry(new ZipEntry("classes.dex"));
+            zos.write(Files.readAllBytes(dex1.toPath()));
+            zos.closeEntry();
+
+            // 2. Corrupted DEX (garbage bytes)
+            zos.putNextEntry(new ZipEntry("classes2.dex"));
+            zos.write(new byte[]{0x64, 0x65, 0x78, 0x0a, 0x00, 0x00, 0x00, 0x00});
+            zos.closeEntry();
+
+            // 3. Native library with su probe
+            zos.putNextEntry(new ZipEntry("lib/arm64-v8a/libtest.so"));
+            zos.write("Some ELF content containing /system/bin/su for root probe".getBytes(StandardCharsets.ISO_8859_1));
+            zos.closeEntry();
+
+            // 4. AndroidManifest with declared permissions (including high-risk usage stats)
+            String manifestXml = """
+                <?xml version="1.0" encoding="utf-8"?>
+                <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.test">
+                    <uses-permission android:name="android.permission.INTERNET"/>
+                    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"/>
+                </manifest>
+                """;
+            zos.putNextEntry(new ZipEntry("AndroidManifest.xml"));
+            zos.write(manifestXml.getBytes(StandardCharsets.UTF_8));
+            zos.closeEntry();
+        }
+
+        PrivacyAuditReport report = PrivacyScannerEngine.scanApk(apkFile);
+
+        assertNotNull(report);
+        assertEquals(2, report.totalDexFilesFound);
+        assertEquals(1, report.totalDexFilesScanned);
+        assertEquals(1, report.totalDexFilesFailed);
+        assertEquals(1, report.totalNativeLibsFound);
+        assertEquals(1, report.totalNativeLibsScanned);
+        assertEquals(0, report.totalNativeLibsFailed);
+        assertFalse(report.scanWarnings.isEmpty());
+        assertTrue(report.scanWarnings.get(0).contains("classes2.dex"));
+
+        // Verify Manifest permissions extracted
+        assertEquals(2, report.declaredPermissions.size());
+        assertTrue(report.declaredPermissions.contains("android.permission.INTERNET"));
+        assertTrue(report.declaredPermissions.contains("android.permission.PACKAGE_USAGE_STATS"));
+        assertEquals(1, report.highRiskPermissions.size());
+        assertTrue(report.highRiskPermissions.contains("android.permission.PACKAGE_USAGE_STATS"));
+
+        // Verify high-risk permission threat recorded
+        boolean foundPermThreat = false;
+        for (DetectedThreat threat : report.threats) {
+            if (threat.title.contains("PACKAGE_USAGE_STATS")) {
+                foundPermThreat = true;
+                break;
+            }
+        }
+        assertTrue("High-risk permission threat must be added to threats list", foundPermThreat);
+
+        apkFile.delete();
     }
 }

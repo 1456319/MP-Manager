@@ -12,11 +12,16 @@ import com.android.tools.smali.dexlib2.iface.instruction.Instruction;
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction;
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction;
 import com.android.tools.smali.dexlib2.iface.instruction.RegisterRangeInstruction;
+import com.android.tools.smali.dexlib2.iface.instruction.ThreeRegisterInstruction;
+import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction;
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference;
 import com.android.tools.smali.dexlib2.iface.reference.StringReference;
+import com.apk.axml.aXMLDecoder;
+import com.apk.axml.serializableItems.XMLEntry;
 import com.reandroid.apk.ApkModule;
 import com.reandroid.archive.InputSource;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.InputStream;
@@ -27,6 +32,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import io.github.abdurazaaqmohammed.feature.apk.DexRepairEngine;
 
@@ -75,24 +82,124 @@ public final class PrivacyScannerEngine {
             "com/unity3d/services/analytics"
     ));
 
+    private static final Pattern PERMISSION_PATTERN = Pattern.compile("<(?:uses-permission|permission)[^>]+?android:name=\"([^\"]+)\"");
+
+    private static final Set<String> HIGH_RISK_PERMISSIONS = new HashSet<>(Arrays.asList(
+            "android.permission.PACKAGE_USAGE_STATS",
+            "android.permission.RECORD_AUDIO",
+            "android.permission.DETECT_SCREEN_CAPTURE",
+            "android.permission.ACCESS_FINE_LOCATION",
+            "android.permission.ACCESS_COARSE_LOCATION",
+            "android.permission.ACCESS_BACKGROUND_LOCATION",
+            "android.permission.READ_PHONE_STATE",
+            "android.permission.READ_PRIVILEGED_PHONE_STATE",
+            "android.permission.GET_ACCOUNTS",
+            "android.permission.READ_CONTACTS",
+            "android.permission.READ_CALL_LOG",
+            "android.permission.READ_SMS",
+            "android.permission.CAMERA",
+            "android.permission.ACTIVITY_RECOGNITION",
+            "android.permission.ACCESS_LOCAL_NETWORK",
+            "android.permission.SYSTEM_ALERT_WINDOW",
+            "com.google.android.gms.permission.AD_ID",
+            "android.permission.ACCESS_ADSERVICES_AD_ID"
+    ));
+
+    public static boolean isHighRiskPermission(String perm) {
+        return HIGH_RISK_PERMISSIONS.contains(perm);
+    }
+
+    public static String extractSimplePermissionName(String perm) {
+        int lastDot = perm.lastIndexOf('.');
+        return (lastDot >= 0 && lastDot < perm.length() - 1) ? perm.substring(lastDot + 1) : perm;
+    }
+
     /**
-     * Scans an entire APK and returns a detailed PrivacyAuditReport.
+     * Scans an entire APK (including companion split APKs) and returns a detailed PrivacyAuditReport.
      */
     public static PrivacyAuditReport scanApk(File apkFile) throws Exception {
-        ApkModule module = ApkModule.loadApkFile(apkFile);
-        module.setLoadDefaultFramework(false);
         PrivacyAuditReport report = new PrivacyAuditReport();
 
-        for (InputSource source : module.getInputSources()) {
-            String name = source.getName();
-            if (!name.matches("classes\\d*\\.dex")) continue;
-
-            byte[] dexBytes = readAll(source.openStream());
-            DexBackedDexFile dex = new DexBackedDexFile(PrivacyBytecodeEngine.opcodesForDex(dexBytes), dexBytes);
-            scanDexInternal(dex, report);
+        List<File> apkTargets = new ArrayList<>();
+        if (apkFile.isDirectory()) {
+            File[] files = apkFile.listFiles((d, name) -> name.endsWith(".apk"));
+            if (files != null) {
+                for (File f : files) apkTargets.add(f);
+            }
+        } else {
+            apkTargets.add(apkFile);
+            // If base.apk was chosen, also discover companion splits in the same package folder
+            File parent = apkFile.getParentFile();
+            if (parent != null && "base.apk".equals(apkFile.getName())) {
+                File[] splits = parent.listFiles((d, fname) ->
+                        (fname.startsWith("split_") || fname.startsWith("split-") || fname.startsWith("config."))
+                        && fname.endsWith(".apk"));
+                if (splits != null) {
+                    for (File s : splits) apkTargets.add(s);
+                }
+            }
         }
 
-        NativeLibAuditor.auditNativeLibs(module, report);
+        for (File target : apkTargets) {
+            try {
+                ApkModule module = ApkModule.loadApkFile(target);
+                module.setLoadDefaultFramework(false);
+
+                for (InputSource source : module.getInputSources()) {
+                    String name = source.getName();
+                    if (name.matches("classes\\d*\\.dex")) {
+                        report.totalDexFilesFound++;
+                        try {
+                            byte[] dexBytes = readAll(source.openStream());
+                            DexBackedDexFile dex = new DexBackedDexFile(PrivacyBytecodeEngine.opcodesForDex(dexBytes), dexBytes);
+                            scanDexInternal(dex, report);
+                            report.totalDexFilesScanned++;
+                        } catch (Exception e) {
+                            report.totalDexFilesFailed++;
+                            report.scanWarnings.add("Failed to parse " + name + " in " + target.getName() + ": " + e.getMessage());
+                        }
+                    } else if ("AndroidManifest.xml".equals(name)) {
+                        try (InputStream is = source.openStream()) {
+                            byte[] manifestBytes = readAll(is);
+                            String xml;
+                            if (manifestBytes.length >= 4 && manifestBytes[0] == 0x03 && manifestBytes[1] == 0x00 && manifestBytes[2] == 0x08 && manifestBytes[3] == 0x00) {
+                                xml = new aXMLDecoder(new ByteArrayInputStream(manifestBytes)).decodeAsString();
+                            } else {
+                                xml = new String(manifestBytes, java.nio.charset.StandardCharsets.UTF_8);
+                            }
+                            if (xml != null) {
+                                Matcher m = PERMISSION_PATTERN.matcher(xml);
+                                while (m.find()) {
+                                    String value = m.group(1);
+                                    if (!report.declaredPermissions.contains(value)) {
+                                        report.declaredPermissions.add(value);
+                                        if (isHighRiskPermission(value)) {
+                                            report.highRiskPermissions.add(value);
+                                            report.addThreat(new DetectedThreat(
+                                                    DetectedThreat.Category.SURVEILLANCE,
+                                                    "High-Risk Declared Permission: " + extractSimplePermissionName(value),
+                                                    "Manifest requests invasive device surveillance or data access permission: " + value,
+                                                    "AndroidManifest.xml",
+                                                    "<permission>",
+                                                    DetectedThreat.ExcisionType.MANIFEST_STRIP,
+                                                    false
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (Exception e) {
+                            report.scanWarnings.add("Could not parse AndroidManifest.xml in " + target.getName() + ": " + e.getMessage());
+                        }
+                    }
+                }
+
+                NativeLibAuditor.auditNativeLibs(module, report);
+            } catch (Exception e) {
+                report.scanWarnings.add("Could not open APK container " + target.getName() + ": " + e.getMessage());
+            }
+        }
+
         report.computeScores();
         return report;
     }
@@ -134,7 +241,10 @@ public final class PrivacyScannerEngine {
 
         // Check if class itself is a tracking SDK
         for (String prefix : TRACKER_PREFIXES) {
-            if (classType.contains(prefix)) {
+            String inner = (classType.startsWith("L") && classType.endsWith(";"))
+                    ? classType.substring(1, classType.length() - 1)
+                    : classType;
+            if (inner.startsWith(prefix + "/") || inner.equals(prefix)) {
                 report.addThreat(new DetectedThreat(
                         DetectedThreat.Category.TRACKER_SDK,
                         "Third-Party Telemetry SDK: " + extractSdkName(prefix),
@@ -176,6 +286,21 @@ public final class PrivacyScannerEngine {
                         if (ref instanceof StringReference) {
                             stringRegisters.put(reg, ((StringReference) ref).getString());
                         }
+                    }
+                } else {
+                    // Invalidate register if instruction overwrites it with non-string data
+                    String opName = op.name;
+                    if (opName.startsWith("move") || opName.startsWith("const") || opName.startsWith("new_")
+                            || opName.startsWith("aget") || opName.startsWith("iget") || opName.startsWith("sget")
+                            || opName.startsWith("array_length") || opName.contains("_to_")
+                            || opName.startsWith("neg_") || opName.startsWith("not_") || opName.endsWith("_2addr")) {
+                        if (inst instanceof OneRegisterInstruction) {
+                            stringRegisters.remove(((OneRegisterInstruction) inst).getRegisterA());
+                        } else if (inst instanceof TwoRegisterInstruction) {
+                            stringRegisters.remove(((TwoRegisterInstruction) inst).getRegisterA());
+                        }
+                    } else if (inst instanceof ThreeRegisterInstruction && (opName.startsWith("add_") || opName.startsWith("sub_") || opName.startsWith("mul_") || opName.startsWith("div_") || opName.startsWith("rem_") || opName.startsWith("and_") || opName.startsWith("or_") || opName.startsWith("xor_") || opName.startsWith("shl_") || opName.startsWith("shr_") || opName.startsWith("ushr_") || opName.startsWith("aget"))) {
+                        stringRegisters.remove(((ThreeRegisterInstruction) inst).getRegisterA());
                     }
                 }
 
@@ -320,12 +445,12 @@ public final class PrivacyScannerEngine {
                             classHasThreat = true;
                         }
 
-                        // 9. Information Leakage: android.util.Log
+                        // 9. Diagnostic / Debug Logging Surface: android.util.Log
                         else if (LOG_CLASS.equals(defClass)) {
                             report.addThreat(new DetectedThreat(
                                     DetectedThreat.Category.LOG_LEAK,
-                                    "Debug Log Leak (android.util.Log." + mName + ")",
-                                    "Logs debug/PII information to system logcat in production.",
+                                    "Diagnostic Log Surface (android.util.Log." + mName + ")",
+                                    "Emits runtime diagnostics and potential state to system logcat in production.",
                                     classType,
                                     method.getName(),
                                     DetectedThreat.ExcisionType.NOP_INVOKE,
@@ -368,26 +493,45 @@ public final class PrivacyScannerEngine {
         return -1;
     }
 
-    private static String resolveKeyString(List<Instruction> instructions, int invokeIdx, int keyReg, Map<Integer, String> stringRegisters) {
-        if (stringRegisters.containsKey(keyReg)) {
-            return stringRegisters.get(keyReg);
+    private static boolean writesRegister(Instruction inst, Opcode op, int targetReg) {
+        if (op == Opcode.CONST_STRING || op == Opcode.CONST_STRING_JUMBO) {
+            return (inst instanceof OneRegisterInstruction) && ((OneRegisterInstruction) inst).getRegisterA() == targetReg;
         }
-        int start = Math.max(0, invokeIdx - 10);
+        String opName = op.name;
+        if (opName.startsWith("move") || opName.startsWith("const") || opName.startsWith("new_")
+                || opName.startsWith("aget") || opName.startsWith("iget") || opName.startsWith("sget")
+                || opName.startsWith("array_length") || opName.contains("_to_")
+                || opName.startsWith("neg_") || opName.startsWith("not_") || opName.endsWith("_2addr")) {
+            if (inst instanceof OneRegisterInstruction) {
+                return ((OneRegisterInstruction) inst).getRegisterA() == targetReg;
+            } else if (inst instanceof TwoRegisterInstruction) {
+                return ((TwoRegisterInstruction) inst).getRegisterA() == targetReg;
+            }
+        } else if (inst instanceof ThreeRegisterInstruction && (opName.startsWith("add_") || opName.startsWith("sub_") || opName.startsWith("mul_") || opName.startsWith("div_") || opName.startsWith("rem_") || opName.startsWith("and_") || opName.startsWith("or_") || opName.startsWith("xor_") || opName.startsWith("shl_") || opName.startsWith("shr_") || opName.startsWith("ushr_") || opName.startsWith("aget"))) {
+            return ((ThreeRegisterInstruction) inst).getRegisterA() == targetReg;
+        }
+        return false;
+    }
+
+    private static String resolveKeyString(List<Instruction> instructions, int invokeIdx, int keyReg, Map<Integer, String> stringRegisters) {
+        int start = Math.max(0, invokeIdx - 15);
         for (int j = invokeIdx - 1; j >= start; j--) {
             Instruction prev = instructions.get(j);
             Opcode op = prev.getOpcode();
-            if (op == Opcode.CONST_STRING || op == Opcode.CONST_STRING_JUMBO) {
-                if (prev instanceof OneRegisterInstruction && prev instanceof ReferenceInstruction) {
-                    if (((OneRegisterInstruction) prev).getRegisterA() == keyReg) {
+            if (writesRegister(prev, op, keyReg)) {
+                if (op == Opcode.CONST_STRING || op == Opcode.CONST_STRING_JUMBO) {
+                    if (prev instanceof ReferenceInstruction) {
                         Object ref = ((ReferenceInstruction) prev).getReference();
                         if (ref instanceof StringReference) {
                             return ((StringReference) ref).getString();
                         }
                     }
                 }
+                // If overwritten by any non-const-string instruction, stop scanning backwards
+                return null;
             }
         }
-        return null;
+        return stringRegisters.get(keyReg);
     }
 
     private static byte[] readAll(InputStream is) throws Exception {

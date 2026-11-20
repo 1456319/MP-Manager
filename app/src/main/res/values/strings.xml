@@ -2658,8 +2658,8 @@ The stub application is replaced with the real one found in the dump and all inj
     <string name="run_script">Run script</string>
     <string name="run_script_confirm">Do you want to run this script?\n\n%s</string>
     <string name="shell_mode_status">Working Mode: %s</string>
-    <string name="privacy_audit_title">Privacy &amp; Invasiveness Audit</string>
-    <string name="privacy_audit_desc">Scan and excise tracking SDKs, hardware IDs, and surveillance probes</string>
+    <string name="privacy_audit_title">Privacy &amp; Invasiveness Audit (Experimental)</string>
+    <string name="privacy_audit_desc">Experimental audit of tracking SDKs, hardware IDs, and surveillance probes</string>
     <string name="privacy_score_label">Invasiveness Risk Score: %1$d/100 (%2$s)</string>
     <string name="privacy_sanitize_btn">Sanitize &amp; Patch</string>
     <string name="privacy_done">APK sanitized! %1$d privacy mutations applied.</string>
@@ -2667,11 +2667,14 @@ The stub application is replaced with the real one found in the dump and all inj
     <string name="privacy_hw_score">Hardware Fingerprinting: %d/100</string>
     <string name="privacy_track_score">Tracking &amp; Telemetry: %d/100</string>
     <string name="privacy_surv_score">Surveillance &amp; Probes: %d/100</string>
-    <string name="privacy_log_score">Debug Log Leaks: %d/100</string>
+    <string name="privacy_log_score">Diagnostic / Debug Logs: %d/100</string>
     <string name="privacy_mode_standard_title">Standard Mode</string>
     <string name="privacy_mode_standard_desc">Generally guarantees app remains stable, but may miss some targets in highly obfuscated or encrypted apps</string>
     <string name="privacy_mode_aggressive_title">Aggressive Mode</string>
     <string name="privacy_mode_aggressive_desc">Generally will kill all telemetry, but might also kill your app. If you try this and your app doesn\'t launch, try standard mode</string>
+    <string name="privacy_rewrite_held_notice">Bytecode rewrite is held pending granular per-target mutation control. This dialog currently provides inspection and risk auditing only.</string>
+    <string name="privacy_scan_coverage">Scan Coverage: %1$d DEX files (%2$d parsed, %3$d failed) • %4$d classes • %5$d native libs • %6$d permissions</string>
+    <string name="privacy_clean_app_summary">No invasive privacy threats or tracking calls were identified in the scanned components.</string>
     <string name="extracted_versions">Extracted Versions</string>
     <string name="protected_app_warning_title">Warning: Protected App</string>
     <string name="antisplit_protected_warning_msg">This app is protected by: %1$s.\n\nConverting this app from split bundle (APKS) to a single APK (Antisplit) may cause it to crash and fail to run after installation due to anti-tamper and integrity protection.\n\nDo you want to proceed with Antisplit anyway?</string>

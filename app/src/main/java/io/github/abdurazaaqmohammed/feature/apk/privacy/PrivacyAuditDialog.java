@@ -54,10 +54,6 @@ public final class PrivacyAuditDialog {
                 PrivacyAuditReport report = PrivacyScannerEngine.scanApk(apkFile);
                 context.runOnUiThread(() -> {
                     pm.dismiss();
-                    if (report.threats.isEmpty()) {
-                        Extensions.showMessage(context, context.getString(R.string.privacy_no_threats));
-                        return;
-                    }
                     displayDialog(context, apkFile, report);
                 });
             } catch (Exception e) {
@@ -109,117 +105,81 @@ public final class PrivacyAuditDialog {
         statsSummary.setPadding(0, padSmall, 0, 0);
         scoreBox.addView(statsSummary);
 
+        TextView coverageSummary = new TextView(context);
+        coverageSummary.setText(String.format(
+                context.getString(R.string.privacy_scan_coverage),
+                report.totalDexFilesFound,
+                report.totalDexFilesScanned,
+                report.totalDexFilesFailed,
+                report.totalClassesScanned,
+                report.totalNativeLibsScanned,
+                report.declaredPermissions.size()
+        ));
+        coverageSummary.setTextSize(12);
+        coverageSummary.setTextColor(Color.parseColor("#757575"));
+        coverageSummary.setPadding(0, padSmall, 0, 0);
+        scoreBox.addView(coverageSummary);
+
+        if (!report.scanWarnings.isEmpty()) {
+            TextView warningsText = new TextView(context);
+            warningsText.setText(String.format("⚠️ %d scan warning(s) during analysis (some files skipped or unreadable)", report.scanWarnings.size()));
+            warningsText.setTextSize(12);
+            warningsText.setTextColor(Color.parseColor("#D32F2F"));
+            warningsText.setPadding(0, padSmall / 2, 0, 0);
+            scoreBox.addView(warningsText);
+        }
+
         root.addView(scoreBox);
         root.addView(createDivider(context));
 
-        // Mode Selection
-        TextView modeHeader = new TextView(context);
-        modeHeader.setText("Sanitization Mode:");
-        modeHeader.setTextSize(14);
-        modeHeader.setTypeface(Typeface.DEFAULT_BOLD);
-        modeHeader.setPadding(0, padSmall, 0, padSmall / 2);
-        root.addView(modeHeader);
-
-        SharedPreferences settings = PreferenceManager.getDefaultSharedPreferences(context);
-        String savedModeName = settings.getString("privacy_mode", SanitizationMode.STANDARD.name());
-        SanitizationMode initialMode;
-        try {
-            initialMode = SanitizationMode.valueOf(savedModeName);
-        } catch (Exception ignored) {
-            initialMode = SanitizationMode.STANDARD;
-        }
-
-        final SanitizationMode[] selectedMode = new SanitizationMode[]{initialMode};
-
-        RadioGroup modeGroup = new RadioGroup(context);
-        modeGroup.setOrientation(LinearLayout.VERTICAL);
-
-        MaterialRadioButton rbStandard = new MaterialRadioButton(context);
-        rbStandard.setId(View.generateViewId());
-        rbStandard.setText(createModeSpan(
-                context.getString(R.string.privacy_mode_standard_title),
-                context.getString(R.string.privacy_mode_standard_desc)
-        ));
-        rbStandard.setPadding(padSmall, padSmall / 2, 0, padSmall / 2);
-
-        MaterialRadioButton rbAggressive = new MaterialRadioButton(context);
-        rbAggressive.setId(View.generateViewId());
-        rbAggressive.setText(createModeSpan(
-                context.getString(R.string.privacy_mode_aggressive_title),
-                context.getString(R.string.privacy_mode_aggressive_desc)
-        ));
-        rbAggressive.setPadding(padSmall, padSmall / 2, 0, padSmall / 2);
-
-        modeGroup.addView(rbStandard);
-        modeGroup.addView(rbAggressive);
-
-        if (initialMode == SanitizationMode.AGGRESSIVE) {
-            rbAggressive.setChecked(true);
+        if (report.threats.isEmpty()) {
+            TextView cleanMsg = new TextView(context);
+            cleanMsg.setText(context.getString(R.string.privacy_clean_app_summary));
+            cleanMsg.setTextSize(13);
+            cleanMsg.setTextColor(Color.parseColor("#388E3C"));
+            cleanMsg.setPadding(0, padSmall, 0, padSmall);
+            root.addView(cleanMsg);
         } else {
-            rbStandard.setChecked(true);
-        }
+            // Threats Header
+            TextView threatsHeader = new TextView(context);
+            threatsHeader.setText(String.format("Detected Threats & Invasiveness Capabilities (%d):", report.threats.size()));
+            threatsHeader.setTextSize(14);
+            threatsHeader.setTypeface(Typeface.DEFAULT_BOLD);
+            threatsHeader.setPadding(0, padSmall, 0, padSmall);
+            root.addView(threatsHeader);
 
-        modeGroup.setOnCheckedChangeListener((group, checkedId) -> {
-            SanitizationMode mode = (checkedId == rbAggressive.getId())
-                    ? SanitizationMode.AGGRESSIVE
-                    : SanitizationMode.STANDARD;
-            selectedMode[0] = mode;
-            settings.edit().putString("privacy_mode", mode.name()).apply();
-        });
+            // Threat Items List
+            for (DetectedThreat threat : report.threats) {
+                LinearLayout itemRow = new LinearLayout(context);
+                itemRow.setOrientation(LinearLayout.VERTICAL);
+                itemRow.setPadding(0, padSmall / 2, 0, padSmall / 2);
 
-        root.addView(modeGroup);
-        root.addView(createDivider(context));
+                TextView itemTitle = new TextView(context);
+                itemTitle.setText(String.format("• %s %s", threat.getRootBadge(), threat.title));
+                itemTitle.setTextSize(13);
+                itemTitle.setTypeface(Typeface.DEFAULT_BOLD);
+                itemRow.addView(itemTitle);
 
-        // Threats Header
-        TextView threatsHeader = new TextView(context);
-        threatsHeader.setText(String.format("Detected Threats & Invasiveness Capabilities (%d):", report.threats.size()));
-        threatsHeader.setTextSize(14);
-        threatsHeader.setTypeface(Typeface.DEFAULT_BOLD);
-        threatsHeader.setPadding(0, padSmall, 0, padSmall);
-        root.addView(threatsHeader);
+                TextView itemDesc = new TextView(context);
+                itemDesc.setText(String.format("%s (%d occurrences)", threat.description, threat.occurrences));
+                itemDesc.setTextSize(12);
+                itemDesc.setTextColor(Color.parseColor("#757575"));
+                itemRow.addView(itemDesc);
 
-        // Threat Items List
-        for (DetectedThreat threat : report.threats) {
-            LinearLayout itemRow = new LinearLayout(context);
-            itemRow.setOrientation(LinearLayout.HORIZONTAL);
-            itemRow.setGravity(Gravity.CENTER_VERTICAL);
-            itemRow.setPadding(0, padSmall / 2, 0, padSmall / 2);
-
-            MaterialCheckBox cb = new MaterialCheckBox(context);
-            cb.setChecked(threat.selectedForExcision);
-            cb.setOnCheckedChangeListener((btn, isChecked) -> threat.selectedForExcision = isChecked);
-            itemRow.addView(cb);
-
-            LinearLayout textCol = new LinearLayout(context);
-            textCol.setOrientation(LinearLayout.VERTICAL);
-
-            TextView itemTitle = new TextView(context);
-            itemTitle.setText(String.format("%s %s", threat.getRootBadge(), threat.title));
-            itemTitle.setTextSize(14);
-            itemTitle.setTypeface(Typeface.DEFAULT_BOLD);
-            textCol.addView(itemTitle);
-
-            TextView itemDesc = new TextView(context);
-            itemDesc.setText(String.format("%s (%d occurrences)", threat.description, threat.occurrences));
-            itemDesc.setTextSize(12);
-            textCol.addView(itemDesc);
-
-            itemRow.addView(textCol);
-            root.addView(itemRow);
+                root.addView(itemRow);
+            }
         }
 
         root.addView(createDivider(context));
 
-        // Auto-sign option
-        MaterialCheckBox autosign = new MaterialCheckBox(context);
-        final boolean[] sign = new boolean[]{settings.getBoolean("autosign", true)};
-        autosign.setText("Auto-sign output APK after sanitization");
-        autosign.setChecked(sign[0]);
-        autosign.setOnCheckedChangeListener((bv, checked) -> {
-            sign[0] = checked;
-            settings.edit().putBoolean("autosign", checked).apply();
-        });
-        root.addView(autosign);
+        // Rewrite Held Notice
+        TextView rewriteNotice = new TextView(context);
+        rewriteNotice.setText(context.getString(R.string.privacy_rewrite_held_notice));
+        rewriteNotice.setTextSize(12);
+        rewriteNotice.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.ITALIC));
+        rewriteNotice.setTextColor(Color.parseColor("#757575"));
+        rewriteNotice.setPadding(0, padSmall, 0, padSmall);
+        root.addView(rewriteNotice);
 
         // ScrollView container
         int maxHeight = (int) (context.getResources().getDisplayMetrics().heightPixels * 0.70);
@@ -229,14 +189,12 @@ public final class PrivacyAuditDialog {
         new MaterialAlertDialogBuilder(context)
                 .setTitle(R.string.privacy_audit_title)
                 .setView(scroller)
-                .setNegativeButton(android.R.string.cancel, null)
-                .setPositiveButton(R.string.privacy_sanitize_btn, (d, w) -> {
-                    settings.edit().putString("privacy_mode", selectedMode[0].name()).apply();
-                    sanitizeAndSave(context, apkFile, report, sign[0], selectedMode[0]);
-                })
+                .setPositiveButton(android.R.string.ok, null)
                 .show();
     }
 
+    // Held pending granular per-target mutation control
+    @SuppressWarnings("unused")
     private static void sanitizeAndSave(MainActivity context, File apkFile, PrivacyAuditReport report, boolean doSign, SanitizationMode selectedMode) {
         PrivacyOptions options = (selectedMode == SanitizationMode.AGGRESSIVE)
                 ? PrivacyOptions.aggressive()
