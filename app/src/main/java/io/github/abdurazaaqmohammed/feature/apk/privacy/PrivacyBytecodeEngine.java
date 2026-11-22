@@ -122,6 +122,8 @@ public final class PrivacyBytecodeEngine {
             Pattern.CASE_INSENSITIVE
     );
 
+    public static final String LISTENABLE_WORKER_CLASS = "Landroidx/work/ListenableWorker;";
+    public static final String WORKER_DATA_CLASS = "Landroidx/work/Data;";
     public static final String WORKER_RESULT_CLASS = "Landroidx/work/ListenableWorker$Result;";
 
     public static class MethodTransformationResult {
@@ -611,7 +613,8 @@ public final class PrivacyBytecodeEngine {
      */
     public static boolean isDoWorkMethod(Method method) {
         if (method == null) return false;
-        return "doWork".equals(method.getName())
+        return !AccessFlags.STATIC.isSet(method.getAccessFlags())
+                && "doWork".equals(method.getName())
                 && WORKER_RESULT_CLASS.equals(DexReachabilityIndex.normalizeClassType(method.getReturnType()))
                 && (method.getParameters() == null || method.getParameters().isEmpty());
     }
@@ -631,13 +634,65 @@ public final class PrivacyBytecodeEngine {
     }
 
     /**
-     * Neutralizes doWork() implementation by replacing instructions with:
+     * Neutralizes doWork() implementation.
+     * When options.preserveWorkerInputData is true:
+     * invoke-virtual {this} Landroidx/work/ListenableWorker;->getInputData()Landroidx/work/Data;
+     * move-result-object v0
+     * invoke-static {v0} Landroidx/work/ListenableWorker$Result;->success(Landroidx/work/Data;)Landroidx/work/ListenableWorker$Result;
+     * move-result-object v0
+     * return-object v0
+     *
+     * When options.preserveWorkerInputData is false:
      * invoke-static {} Landroidx/work/ListenableWorker$Result;->success()Landroidx/work/ListenableWorker$Result;
      * move-result-object v0
      * return-object v0
-     * Ensures registerCount >= 1.
      */
     public static MutableMethodImplementation neutralizeWorkerClass(ClassDef classDef, MutableMethodImplementation mutable, PrivacyStats stats) {
+        return neutralizeWorkerClass(classDef, mutable, null, stats);
+    }
+
+    public static MutableMethodImplementation neutralizeWorkerClass(ClassDef classDef, MutableMethodImplementation mutable, PrivacyOptions options, PrivacyStats stats) {
+        boolean preserveData = options != null && options.preserveWorkerInputData;
+
+        if (preserveData) {
+            MutableMethodImplementation newImpl = new MutableMethodImplementation(2);
+            // In a virtual method with 0 arguments, v1 is p0 (this), v0 is local register
+            BuilderInstruction invokeGetInputData = new BuilderInstruction35c(
+                    Opcode.INVOKE_VIRTUAL,
+                    1, 1, 0, 0, 0, 0,
+                    new ImmutableMethodReference(
+                            LISTENABLE_WORKER_CLASS,
+                            "getInputData",
+                            Collections.emptyList(),
+                            WORKER_DATA_CLASS
+                    )
+            );
+            BuilderInstruction moveData = new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 0);
+            BuilderInstruction invokeSuccess = new BuilderInstruction35c(
+                    Opcode.INVOKE_STATIC,
+                    1, 0, 0, 0, 0, 0,
+                    new ImmutableMethodReference(
+                            WORKER_RESULT_CLASS,
+                            "success",
+                            Collections.singletonList(WORKER_DATA_CLASS),
+                            WORKER_RESULT_CLASS
+                    )
+            );
+            BuilderInstruction moveResult = new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 0);
+            BuilderInstruction returnObj = new BuilderInstruction11x(Opcode.RETURN_OBJECT, 0);
+
+            newImpl.addInstruction(invokeGetInputData);
+            newImpl.addInstruction(moveData);
+            newImpl.addInstruction(invokeSuccess);
+            newImpl.addInstruction(moveResult);
+            newImpl.addInstruction(returnObj);
+
+            if (stats != null) {
+                stats.backgroundWorkersNeutralized++;
+            }
+            return newImpl;
+        }
+
         int regCount = mutable != null ? Math.max(1, mutable.getRegisterCount()) : 1;
         MutableMethodImplementation newImpl = new MutableMethodImplementation(regCount);
 
@@ -755,7 +810,7 @@ public final class PrivacyBytecodeEngine {
                     MutableMethodImplementation mutable = m.getImplementation() != null
                             ? new MutableMethodImplementation(m.getImplementation())
                             : null;
-                    MutableMethodImplementation newImpl = neutralizeWorkerClass(classDef, mutable, outStats);
+                    MutableMethodImplementation newImpl = neutralizeWorkerClass(classDef, mutable, options, outStats);
                     int flags = m.getAccessFlags() & ~(AccessFlags.ABSTRACT.getValue() | AccessFlags.NATIVE.getValue());
                     Method rewritten = new ImmutableMethod(
                             m.getDefiningClass(),
@@ -806,7 +861,7 @@ public final class PrivacyBytecodeEngine {
                     MutableMethodImplementation mutable = m.getImplementation() != null
                             ? new MutableMethodImplementation(m.getImplementation())
                             : null;
-                    MutableMethodImplementation newImpl = neutralizeWorkerClass(classDef, mutable, outStats);
+                    MutableMethodImplementation newImpl = neutralizeWorkerClass(classDef, mutable, options, outStats);
                     int flags = m.getAccessFlags() & ~(AccessFlags.ABSTRACT.getValue() | AccessFlags.NATIVE.getValue());
                     Method rewritten = new ImmutableMethod(
                             m.getDefiningClass(),
@@ -1038,12 +1093,15 @@ public final class PrivacyBytecodeEngine {
                 overallStatus = ModuleAuditResult.Status.WARNING_ZERO_MUTATIONS;
             }
 
-            // If apkOut != null and mutations applied (or always if caller requested apkOut copy), write APK
+            // If apkOut != null and mutations applied, write APK.
+            // When total mutations == 0, do not write a placebo APK.
             if (apkOut != null) {
-                if (totalStats.totalMutations() > 0 || !apkOut.equals(apkIn)) {
+                if (totalStats.totalMutations() > 0) {
                     File parent = apkOut.getParentFile();
                     if (parent != null) parent.mkdirs();
                     module.writeApk(apkOut);
+                } else if (apkOut.exists() && !apkOut.equals(apkIn)) {
+                    apkOut.delete();
                 }
             }
 

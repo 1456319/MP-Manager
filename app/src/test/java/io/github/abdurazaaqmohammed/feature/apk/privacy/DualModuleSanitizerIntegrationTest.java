@@ -445,6 +445,22 @@ public class DualModuleSanitizerIntegrationTest {
         assertTrue(report.getSanitizationStats().telemetryDeadCodeSkipped > 0);
         assertEquals(0, report.getSanitizationStats().aiDeadCodeSkipped);
         assertEquals(0, report.getSanitizationStats().totalMutations());
+        assertFalse("apkOut must not be created when zero mutations are applied", apkOut.exists());
+    }
+
+    @Test
+    public void testZeroMutationHonestyGateDoesNotWritePlaceboApk() throws Exception {
+        File tempDir = Files.createTempDirectory("clean_app_test").toFile();
+        File dex1 = assembleDex(tempDir, "classes.dex", BENIGN_UTIL_SMALI);
+        File apkIn = buildTestApk(tempDir, "clean_app.apk", dex1);
+        File apkOut = new File(tempDir, "clean_app_sanitized.apk");
+
+        PrivacyAuditReport report = PrivacyBytecodeEngine.sanitizeApkWithAudit(apkIn, apkOut, PrivacyOptions.standard(), null);
+
+        assertNotNull(report);
+        assertEquals(0, report.getSanitizationStats().totalMutations());
+        assertEquals(ModuleAuditResult.Status.WARNING_ZERO_MUTATIONS, report.getOverallSanitizationStatus());
+        assertFalse("Honesty gate must prevent creating placebo _sanitized.apk", apkOut.exists());
     }
 
     @Test

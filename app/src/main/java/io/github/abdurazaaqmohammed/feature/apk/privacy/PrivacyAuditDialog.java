@@ -25,6 +25,7 @@ import com.reandroid.apk.APKLogger;
 import org.apache.commons.io.FilenameUtils;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.List;
 
 import io.github.abdurazaaqmohammed.MPManager.R;
@@ -235,9 +236,39 @@ public final class PrivacyAuditDialog {
                             ? auditResult.getSanitizationStats()
                             : new PrivacyStats();
 
+                    if (stats.totalMutations() == 0) {
+                        pm.dismiss();
+                        context.runOnUiThread(() -> {
+                            Extensions.showMessage(context, context.getString(R.string.privacy_no_mutations_applied));
+                            context.refreshAllPanes();
+                        });
+                        return;
+                    }
+
                     if (doSign && wrapper[0] != null) {
-                        pm.setText("Signing sanitized APK...");
-                        wrapper[0].signApk(outFile);
+                        List<File> splits = ApkBundlePacker.discoverCompanionSplits(apkFile);
+                        if (!splits.isEmpty()) {
+                            List<File> allInputs = new ArrayList<>();
+                            allInputs.add(apkFile);
+                            allInputs.addAll(splits);
+                            boolean consistent = ApkBundlePacker.verifySignatureConsistency(allInputs);
+                            if (consistent) {
+                                pm.setText("Co-signing base and companion splits...");
+                                List<File> signedSplits = ApkBundlePacker.coSignSplitSet(outFile, splits, outFile.getParentFile(), wrapper[0], logger != null ? logger::logMessage : null);
+                                if (!ApkBundlePacker.verifySignatureConsistency(signedSplits) && logger != null) {
+                                    logger.logMessage("Warning: Co-signed split bundle verification mismatch");
+                                }
+                            } else {
+                                if (logger != null) {
+                                    logger.logMessage("Companion splits signature mismatch or unsigned; signing base APK only");
+                                }
+                                pm.setText("Signing sanitized APK...");
+                                wrapper[0].signApk(outFile);
+                            }
+                        } else {
+                            pm.setText("Signing sanitized APK...");
+                            wrapper[0].signApk(outFile);
+                        }
                     }
 
                     pm.dismiss();

@@ -285,6 +285,60 @@ public class WorkerNeutralizationTest {
     }
 
     @Test
+    public void testPreserveWorkerInputDataInStandardMode() throws Exception {
+        File dexFile = assembleSmali(ANALYTICS_WORKER_SMALI);
+        DexBackedDexFile dex = DexFileFactory.loadDexFile(dexFile, Opcodes.getDefault());
+        ClassDef workerDef = findClass(dex, "Lcom/example/AnalyticsWorker;");
+        assertNotNull(workerDef);
+
+        PrivacyOptions standardSafe = PrivacyOptions.standard();
+        assertTrue("Standard mode must have preserveWorkerInputData enabled", standardSafe.preserveWorkerInputData);
+
+        PrivacyStats stats = new PrivacyStats();
+        ClassDef sanitized = PrivacyBytecodeEngine.sanitizeClass(workerDef, standardSafe, stats);
+
+        assertEquals(1, stats.backgroundWorkersNeutralized);
+
+        Method doWorkMethod = null;
+        for (Method m : sanitized.getVirtualMethods()) {
+            if ("doWork".equals(m.getName())) {
+                doWorkMethod = m;
+                break;
+            }
+        }
+        assertNotNull(doWorkMethod);
+        List<Instruction> instructions = new ArrayList<>();
+        for (Instruction inst : doWorkMethod.getImplementation().getInstructions()) {
+            instructions.add(inst);
+        }
+        assertEquals(5, instructions.size());
+
+        // Instruction 0: invoke-virtual {v1}, Landroidx/work/ListenableWorker;->getInputData()Landroidx/work/Data;
+        assertEquals(Opcode.INVOKE_VIRTUAL, instructions.get(0).getOpcode());
+        MethodReference mr0 = (MethodReference) ((ReferenceInstruction) instructions.get(0)).getReference();
+        assertEquals("Landroidx/work/ListenableWorker;", mr0.getDefiningClass());
+        assertEquals("getInputData", mr0.getName());
+        assertEquals("Landroidx/work/Data;", mr0.getReturnType());
+
+        // Instruction 1: move-result-object v0
+        assertEquals(Opcode.MOVE_RESULT_OBJECT, instructions.get(1).getOpcode());
+
+        // Instruction 2: invoke-static {v0}, Landroidx/work/ListenableWorker$Result;->success(Landroidx/work/Data;)Landroidx/work/ListenableWorker$Result;
+        assertEquals(Opcode.INVOKE_STATIC, instructions.get(2).getOpcode());
+        MethodReference mr2 = (MethodReference) ((ReferenceInstruction) instructions.get(2)).getReference();
+        assertEquals("Landroidx/work/ListenableWorker$Result;", mr2.getDefiningClass());
+        assertEquals("success", mr2.getName());
+        assertEquals(1, mr2.getParameterTypes().size());
+        assertEquals("Landroidx/work/Data;", mr2.getParameterTypes().get(0));
+
+        // Instruction 3: move-result-object v0
+        assertEquals(Opcode.MOVE_RESULT_OBJECT, instructions.get(3).getOpcode());
+
+        // Instruction 4: return-object v0
+        assertEquals(Opcode.RETURN_OBJECT, instructions.get(4).getOpcode());
+    }
+
+    @Test
     public void testDeadWorkerSkippedWithReachabilityIndex() throws Exception {
         File dexFile = assembleSmali(DEAD_WORKER_SMALI, CALLER_SMALI);
         DexBackedDexFile dex = DexFileFactory.loadDexFile(dexFile, Opcodes.getDefault());
@@ -546,5 +600,46 @@ public class WorkerNeutralizationTest {
         DexBackedDexFile parsed = new DexBackedDexFile(Opcodes.getDefault(), store.getData());
         assertNotNull(findClass(parsed, "Lcom/example/NativeTelemetryWorker;"));
         assertNotNull(findClass(parsed, "Lcom/example/AbstractTelemetryWorker;"));
+    }
+
+    @Test
+    public void testStaticDoWorkHelperMethodNotNeutralized() throws Exception {
+        String staticHelperSmali = """
+                .class public Lcom/example/StaticWorkerHelper;
+                .super Ljava/lang/Object;
+                .source "StaticWorkerHelper.java"
+
+                .method public constructor <init>()V
+                    .locals 0
+                    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+                    return-void
+                .end method
+
+                .method public static doWork()Landroidx/work/ListenableWorker$Result;
+                    .locals 1
+                    invoke-static {}, Landroidx/work/ListenableWorker$Result;->success()Landroidx/work/ListenableWorker$Result;
+                    move-result-object v0
+                    return-object v0
+                .end method
+                """;
+        File dexFile = assembleSmali(staticHelperSmali);
+        DexBackedDexFile dex = DexFileFactory.loadDexFile(dexFile, Opcodes.getDefault());
+        ClassDef helperDef = findClass(dex, "Lcom/example/StaticWorkerHelper;");
+        assertNotNull(helperDef);
+
+        Method staticMethod = null;
+        for (Method m : helperDef.getDirectMethods()) {
+            if ("doWork".equals(m.getName())) {
+                staticMethod = m;
+                break;
+            }
+        }
+        assertNotNull(staticMethod);
+        assertFalse("isDoWorkMethod must return false for static methods to avoid VerifyError",
+                PrivacyBytecodeEngine.isDoWorkMethod(staticMethod));
+
+        PrivacyStats stats = new PrivacyStats();
+        ClassDef sanitized = PrivacyBytecodeEngine.sanitizeClass(helperDef, PrivacyOptions.standard(), stats);
+        assertEquals("Static helper method must not be neutralized", 0, stats.backgroundWorkersNeutralized);
     }
 }

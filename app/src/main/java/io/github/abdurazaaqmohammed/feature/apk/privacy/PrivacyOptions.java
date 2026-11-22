@@ -49,6 +49,9 @@ public class PrivacyOptions implements Serializable {
     /** Blank WifiInfo.getMacAddress() callsites to return dummy MAC address. */
     public boolean blankWifiMac = false;
 
+    /** Preserve worker input data in Result.success(getInputData()) to prevent downstream NPEs. */
+    public boolean preserveWorkerInputData = false;
+
     /** Suppress PeriodicWorkRequest / enqueuePeriodicWork bytecode callsites. */
     public boolean suppressPeriodicWorkEnqueue = false;
 
@@ -123,6 +126,7 @@ public class PrivacyOptions implements Serializable {
         options.blankAndroidId = false;
         options.blankHardwareSerial = false;
         options.blankWifiMac = false;
+        options.preserveWorkerInputData = true;
         options.suppressPeriodicWorkEnqueue = false;
         options.deepStructuralAnalysis = false;
         options.stripLogging = true;
@@ -200,6 +204,7 @@ public class PrivacyOptions implements Serializable {
         private boolean blankAndroidId = false;
         private boolean blankHardwareSerial = false;
         private boolean blankWifiMac = false;
+        private boolean preserveWorkerInputData = false;
         private boolean suppressPeriodicWorkEnqueue = false;
         private boolean nullifyTrackerClinit = false;
         private boolean deepStructuralAnalysis = false;
@@ -226,6 +231,11 @@ public class PrivacyOptions implements Serializable {
 
         public Builder setBlankWifiMac(boolean blankWifiMac) {
             this.blankWifiMac = blankWifiMac;
+            return this;
+        }
+
+        public Builder setPreserveWorkerInputData(boolean preserveWorkerInputData) {
+            this.preserveWorkerInputData = preserveWorkerInputData;
             return this;
         }
 
@@ -310,6 +320,7 @@ public class PrivacyOptions implements Serializable {
             options.blankAndroidId = blankAndroidId;
             options.blankHardwareSerial = blankHardwareSerial;
             options.blankWifiMac = blankWifiMac;
+            options.preserveWorkerInputData = preserveWorkerInputData;
             options.suppressPeriodicWorkEnqueue = suppressPeriodicWorkEnqueue;
             options.nullifyTrackerClinit = nullifyTrackerClinit;
             options.deepStructuralAnalysis = deepStructuralAnalysis;
