@@ -24,7 +24,7 @@ public class PrivacyOptions implements Serializable {
     /** Blank TelephonyManager identifiers (IMEI, Device ID, SIM serial, Phone number). */
     public boolean emptyTelephonyIds = true;
 
-    /** Neutralize Google Advertising ID (GAID) and blank Settings.Secure android_id. */
+    /** Neutralize Google Advertising ID (GAID) to zeroed RFC UUID. */
     public boolean neutralizeAdIds = true;
 
     /** Mask Developer Options and ADB debugging checks to return 0 / disabled. */
@@ -40,7 +40,7 @@ public class PrivacyOptions implements Serializable {
     // Aggressive Mode Extensions (Hardware & WorkManager)
     // ==========================================
 
-    /** Blank Settings.Secure android_id callsites to return empty string (""). */
+    /** Blank Settings.Secure android_id callsites to return 16-hex dummy ("0000000000000000"). */
     public boolean blankAndroidId = false;
 
     /** Blank Build.SERIAL and Build.getSerial() to return empty string (""). */
@@ -166,7 +166,15 @@ public class PrivacyOptions implements Serializable {
     }
 
     public static PrivacyOptions all() {
-        return new PrivacyOptions(true, true, true, true, true, true, true, true, true, true);
+        PrivacyOptions options = new PrivacyOptions(true, true, true, true, true, true, true, true, true, true);
+        options.mode = SanitizationMode.AGGRESSIVE;
+        options.blankAndroidId = true;
+        options.blankHardwareSerial = true;
+        options.blankWifiMac = true;
+        options.suppressPeriodicWorkEnqueue = true;
+        options.nullifyTrackerClinit = true;
+        options.deepStructuralAnalysis = true;
+        return options;
     }
 
     public static PrivacyOptions none() {

@@ -140,9 +140,41 @@ public final class PrivacyBytecodeEngine {
      * Sanitizes a single MethodImplementation according to the supplied PrivacyOptions.
      */
     public static MethodTransformationResult sanitizeMethod(Method method, PrivacyOptions options) {
+        return sanitizeMethod(method, options, null);
+    }
+
+    /**
+     * Sanitizes a single MethodImplementation according to the supplied PrivacyOptions and MutationPlan.
+     */
+    public static MethodTransformationResult sanitizeMethod(Method method, PrivacyOptions options, MutationPlan plan) {
         if (options == null) options = PrivacyOptions.all();
         MethodImplementation impl = method.getImplementation();
         if (impl == null) {
+            return new MethodTransformationResult(false, new PrivacyStats(), method);
+        }
+
+        String declaringClass = method.getDefiningClass();
+        String mName = method.getName();
+
+        boolean stripLog = options.stripLogging && (plan == null || plan.shouldPerformAction(declaringClass, mName, MutationPlan.MutationAction.STRIP_LOG));
+        boolean emptyTelephony = options.emptyTelephonyIds && (plan == null || plan.shouldPerformAction(declaringClass, mName, MutationPlan.MutationAction.BLANK_TELEPHONY));
+        boolean neutralizeAdIds = options.neutralizeAdIds && (plan == null || plan.shouldPerformAction(declaringClass, mName, MutationPlan.MutationAction.NEUTRALIZE_AD_ID));
+        boolean blankAndroidId = (options.blankAndroidId || options.mode == SanitizationMode.AGGRESSIVE)
+                && (plan == null || plan.shouldPerformAction(declaringClass, mName, MutationPlan.MutationAction.BLANK_ANDROID_ID));
+        boolean maskDevMode = options.maskDeveloperMode && (plan == null || plan.shouldPerformAction(declaringClass, mName, MutationPlan.MutationAction.MASK_DEV_MODE));
+        boolean sinkholeDomains = options.sinkholeTelemetryDomains && (plan == null || plan.shouldPerformAction(declaringClass, mName, MutationPlan.MutationAction.SINKHOLE_DOMAIN));
+
+        boolean blankHardwareSerial = (options.blankHardwareSerial || options.mode == SanitizationMode.AGGRESSIVE)
+                && (plan == null || plan.shouldPerformAction(declaringClass, mName, MutationPlan.MutationAction.BLANK_ANDROID_ID));
+        boolean blankWifiMac = (options.blankWifiMac || options.mode == SanitizationMode.AGGRESSIVE)
+                && (plan == null || plan.shouldPerformAction(declaringClass, mName, MutationPlan.MutationAction.BLANK_ANDROID_ID));
+        boolean suppressPeriodicWork = (options.suppressPeriodicWorkEnqueue || options.mode == SanitizationMode.AGGRESSIVE)
+                && (plan == null || plan.shouldPerformAction(declaringClass, mName, MutationPlan.MutationAction.NEUTRALIZE_WORKER));
+        boolean nullifyAiMethod = options.nullifyAiAssistants
+                && (plan == null || plan.allowsAiNullification(declaringClass));
+
+        if (!stripLog && !emptyTelephony && !neutralizeAdIds && !blankAndroidId && !maskDevMode && !sinkholeDomains
+                && !blankHardwareSerial && !blankWifiMac && !suppressPeriodicWork && !nullifyAiMethod) {
             return new MethodTransformationResult(false, new PrivacyStats(), method);
         }
 
@@ -150,10 +182,6 @@ public final class PrivacyBytecodeEngine {
         List<BuilderInstruction> instructions = mutable.getInstructions();
         PrivacyStats stats = new PrivacyStats();
         boolean modified = false;
-
-        boolean blankHardwareSerial = options.blankHardwareSerial || options.mode == SanitizationMode.AGGRESSIVE;
-        boolean blankWifiMac = options.blankWifiMac || options.mode == SanitizationMode.AGGRESSIVE;
-        boolean suppressPeriodicWork = options.suppressPeriodicWorkEnqueue || options.mode == SanitizationMode.AGGRESSIVE;
 
         Map<Integer, String> stringRegisters = new HashMap<>();
 
@@ -169,7 +197,7 @@ public final class PrivacyBytecodeEngine {
                     if (ref instanceof StringReference) {
                         String sVal = ((StringReference) ref).getString();
                         stringRegisters.put(reg, sVal);
-                        if (options.sinkholeTelemetryDomains && DomainSinkholer.isTelemetryEndpoint(sVal)) {
+                        if (sinkholeDomains && DomainSinkholer.isTelemetryEndpoint(sVal)) {
                             mutable.replaceInstruction(i, new BuilderInstruction21c(
                                     Opcode.CONST_STRING,
                                     reg,
@@ -194,7 +222,7 @@ public final class PrivacyBytecodeEngine {
             }
 
             // 1. Log Stripping (android.util.Log)
-            if (options.stripLogging && isInvokeStatic(op)) {
+            if (stripLog && isInvokeStatic(op)) {
                 if (inst instanceof ReferenceInstruction) {
                     Object ref = ((ReferenceInstruction) inst).getReference();
                     if (ref instanceof MethodReference) {
@@ -217,7 +245,7 @@ public final class PrivacyBytecodeEngine {
             }
 
             // 2. Empty Telephony Identifiers (IMEI, SIM serial, Phone number)
-            if (options.emptyTelephonyIds && isInvokeVirtualOrInterface(op)) {
+            if (emptyTelephony && isInvokeVirtualOrInterface(op)) {
                 if (inst instanceof ReferenceInstruction) {
                     Object ref = ((ReferenceInstruction) inst).getReference();
                     if (ref instanceof MethodReference) {
@@ -244,13 +272,13 @@ public final class PrivacyBytecodeEngine {
                 }
             }
 
-            // 3. Neutralize Advertising & Device Identifiers
-            if (options.neutralizeAdIds) {
+            // 3. Neutralize Advertising Identifiers (RFC 4122 zeroed UUID)
+            if (neutralizeAdIds) {
                 if (inst instanceof ReferenceInstruction) {
                     Object ref = ((ReferenceInstruction) inst).getReference();
                     if (ref instanceof MethodReference) {
                         MethodReference mr = (MethodReference) ref;
-                        // AdvertisingIdClient$Info.getId() -> ""
+                        // AdvertisingIdClient$Info.getId() -> "00000000-0000-0000-0000-000000000000"
                         if (ADVERTISING_INFO.equals(mr.getDefiningClass()) && "getId".equals(mr.getName()) && "Ljava/lang/String;".equals(mr.getReturnType())) {
                             if (i + 1 < instructions.size()) {
                                 Instruction next = instructions.get(i + 1);
@@ -259,11 +287,11 @@ public final class PrivacyBytecodeEngine {
                                     mutable.replaceInstruction(i + 1, new BuilderInstruction21c(
                                             Opcode.CONST_STRING,
                                             resReg,
-                                            new ImmutableStringReference("")
+                                            new ImmutableStringReference("00000000-0000-0000-0000-000000000000")
                                     ));
                                     stats.adIdsNeutralized++;
                                     modified = true;
-                                    stringRegisters.put(resReg, "");
+                                    stringRegisters.put(resReg, "00000000-0000-0000-0000-000000000000");
                                 }
                             }
                         }
@@ -279,8 +307,17 @@ public final class PrivacyBytecodeEngine {
                                 }
                             }
                         }
-                        // Settings.Secure.getString(..., "android_id") -> ""
-                        else if (SETTINGS_SECURE.equals(mr.getDefiningClass())
+                    }
+                }
+            }
+
+            // 3b. Hardware Android ID Blanking (Strictly gated by blankAndroidId; safe 16-hex dummy)
+            if (blankAndroidId) {
+                if (inst instanceof ReferenceInstruction) {
+                    Object ref = ((ReferenceInstruction) inst).getReference();
+                    if (ref instanceof MethodReference) {
+                        MethodReference mr = (MethodReference) ref;
+                        if (SETTINGS_SECURE.equals(mr.getDefiningClass())
                                 && ("getString".equals(mr.getName()) || "getStringForUser".equals(mr.getName()))
                                 && "Ljava/lang/String;".equals(mr.getReturnType())) {
                             int keyReg = getArgumentRegister(inst, 1);
@@ -294,11 +331,11 @@ public final class PrivacyBytecodeEngine {
                                             mutable.replaceInstruction(i + 1, new BuilderInstruction21c(
                                                     Opcode.CONST_STRING,
                                                     resReg,
-                                                    new ImmutableStringReference("")
+                                                    new ImmutableStringReference("0000000000000000")
                                             ));
-                                            stats.adIdsNeutralized++;
+                                            stats.hardwareIdentifiersBlanked++;
                                             modified = true;
-                                            stringRegisters.put(resReg, "");
+                                            stringRegisters.put(resReg, "0000000000000000");
                                         }
                                     }
                                 }
@@ -309,7 +346,7 @@ public final class PrivacyBytecodeEngine {
             }
 
             // 4. Developer Mode & ADB Masker
-            if (options.maskDeveloperMode) {
+            if (maskDevMode) {
                 if (inst instanceof ReferenceInstruction) {
                     Object ref = ((ReferenceInstruction) inst).getReference();
                     if (ref instanceof MethodReference) {
@@ -369,7 +406,7 @@ public final class PrivacyBytecodeEngine {
             }
 
             // 5. Cloud Experiment Gates (WebLab / LaunchDarkly)
-            if (options.nullifyAiAssistants && options.forceAiExperimentControl && isInvoke(op)) {
+            if (nullifyAiMethod && options.forceAiExperimentControl && isInvoke(op)) {
                 if (inst instanceof ReferenceInstruction) {
                     Object ref = ((ReferenceInstruction) inst).getReference();
                     if (ref instanceof MethodReference) {
@@ -639,30 +676,51 @@ public final class PrivacyBytecodeEngine {
      * Sanitizes all direct and virtual methods in a ClassDef.
      */
     public static ClassDef sanitizeClass(ClassDef classDef, PrivacyOptions options, PrivacyStats outStats) {
-        return sanitizeClass(classDef, options, outStats, null);
+        return sanitizeClass(classDef, options, outStats, null, null);
     }
 
     /**
      * Sanitizes all direct and virtual methods in a ClassDef with optional reachability discovery.
      */
     public static ClassDef sanitizeClass(ClassDef classDef, PrivacyOptions options, PrivacyStats outStats, DexReachabilityIndex reachabilityIndex) {
+        return sanitizeClass(classDef, options, outStats, reachabilityIndex, null);
+    }
+
+    /**
+     * Sanitizes all direct and virtual methods in a ClassDef with optional reachability discovery and targeted mutation plan.
+     */
+    public static ClassDef sanitizeClass(ClassDef classDef, PrivacyOptions options, PrivacyStats outStats, DexReachabilityIndex reachabilityIndex, MutationPlan plan) {
         if (options == null) options = PrivacyOptions.all();
+
+        boolean isWorkerCandidate = options.neutralizeBackgroundWorkers
+                && (plan == null || plan.allowsWorkerNeutralization(classDef.getType()))
+                && isTelemetryWorker(classDef);
+        boolean isAiCandidate = options.nullifyAiAssistants
+                && (plan == null || plan.allowsAiNullification(classDef.getType()))
+                && (AiBytecodeRules.isAiControllerClass(classDef) || AiBytecodeRules.isTabIngressClass(classDef.getType()));
+
+        if (plan != null && !plan.isWholesale() && !plan.hasTargetsForClass(classDef.getType())
+                && !isWorkerCandidate && !isAiCandidate) {
+            return classDef;
+        }
+
         List<Method> directMethods = new ArrayList<>();
         List<Method> virtualMethods = new ArrayList<>();
         boolean classModified = false;
 
-        boolean isTelemetryWorker = options.neutralizeBackgroundWorkers && isTelemetryWorker(classDef);
+        boolean isTelemetryWorker = isWorkerCandidate;
         boolean hasWorker = isTelemetryWorker && hasDoWorkMethod(classDef);
         boolean isDeadWorker = hasWorker && (reachabilityIndex != null && !reachabilityIndex.isClassReferenced(classDef.getType()));
 
-        boolean nullifyAi = options.nullifyAiAssistants;
+        boolean nullifyAi = isAiCandidate;
         boolean isAiClass = nullifyAi && AiBytecodeRules.isAiControllerClass(classDef);
         boolean stubAiEligibility = nullifyAi && options.stubAiEligibilityManagers;
         boolean neutralizeTabIngress = nullifyAi && (options.neutralizeAiTabIngress || options.neutraliseAiTabIngress);
 
         boolean nullifyTrackerClinit = options.mode == SanitizationMode.AGGRESSIVE
                 && (options.deepStructuralAnalysis || options.nullifyTrackerClinit)
-                && isPureTrackerClass(classDef.getType());
+                && isPureTrackerClass(classDef.getType())
+                && (plan == null || plan.shouldPerformAction(classDef.getType(), "<clinit>", MutationPlan.MutationAction.SINKHOLE_DOMAIN));
 
         if (isDeadWorker) {
             if (outStats != null) {
@@ -729,7 +787,7 @@ public final class PrivacyBytecodeEngine {
                     directMethods.add(m);
                 }
             } else {
-                MethodTransformationResult result = sanitizeMethod(m, options);
+                MethodTransformationResult result = sanitizeMethod(m, options, plan);
                 if (result.modified) {
                     classModified = true;
                     if (outStats != null) outStats.merge(result.stats);
@@ -780,7 +838,7 @@ public final class PrivacyBytecodeEngine {
                     virtualMethods.add(m);
                 }
             } else {
-                MethodTransformationResult result = sanitizeMethod(m, options);
+                MethodTransformationResult result = sanitizeMethod(m, options, plan);
                 if (result.modified) {
                     classModified = true;
                     if (outStats != null) outStats.merge(result.stats);
@@ -861,6 +919,14 @@ public final class PrivacyBytecodeEngine {
      * on Pass 1 across all classes*.dex entries.
      */
     public static PrivacyAuditReport sanitizeApkWithAudit(File apkIn, File apkOut, PrivacyOptions options, DexReachabilityIndex reachabilityIndex, APKLogger logger) throws Exception {
+        return sanitizeApkWithAudit(apkIn, apkOut, options, reachabilityIndex, null, logger);
+    }
+
+    /**
+     * Orchestrates multi-DEX streaming analysis and sanitization with granular audit reporting,
+     * optional reachability index, and targeted mutation plan.
+     */
+    public static PrivacyAuditReport sanitizeApkWithAudit(File apkIn, File apkOut, PrivacyOptions options, DexReachabilityIndex reachabilityIndex, MutationPlan plan, APKLogger logger) throws Exception {
         if (options == null) options = PrivacyOptions.all();
 
         try (ApkModule module = ApkModule.loadApkFile(apkIn)) {
@@ -894,7 +960,7 @@ public final class PrivacyBytecodeEngine {
                 boolean anyClassChanged = false;
 
                 for (ClassDef classDef : dex.getClasses()) {
-                    ClassDef sanitized = sanitizeClass(classDef, options, dexStats, reachability);
+                    ClassDef sanitized = sanitizeClass(classDef, options, dexStats, reachability, plan);
                     if (sanitized != classDef) {
                         anyClassChanged = true;
                     }

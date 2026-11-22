@@ -139,7 +139,8 @@ public class PrivacyBytecodeEngineTest {
         assertTrue(stats.classesModified > 0);
         assertTrue("Log calls stripped: " + stats.logCallsStripped, stats.logCallsStripped >= 1);
         assertTrue("Telephony getters blanked: " + stats.telephonyGettersBlanked, stats.telephonyGettersBlanked >= 1);
-        assertTrue("Ad IDs neutralized: " + stats.adIdsNeutralized, stats.adIdsNeutralized >= 3);
+        assertTrue("Ad IDs neutralized: " + stats.adIdsNeutralized, stats.adIdsNeutralized >= 2);
+        assertTrue("Hardware identifiers blanked: " + stats.hardwareIdentifiersBlanked, stats.hardwareIdentifiersBlanked >= 1);
         assertTrue("Dev mode checks masked: " + stats.devModeChecksMasked, stats.devModeChecksMasked >= 2);
 
         // Verify transformed instructions in methods
@@ -189,17 +190,17 @@ public class PrivacyBytecodeEngineTest {
                 }
                 assertTrue("const 1 not found in testAdTrackingLimit", foundConstOne);
             } else if ("testAndroidId".equals(method.getName())) {
-                // android_id query result rewritten to const-string ""
-                int emptyStringCount = 0;
+                // android_id query result rewritten to const-string "0000000000000000"
+                boolean foundDummyHex = false;
                 for (Instruction inst : instructions) {
                     if (inst.getOpcode() == Opcode.CONST_STRING && inst instanceof ReferenceInstruction) {
                         Object ref = ((ReferenceInstruction) inst).getReference();
-                        if (ref instanceof StringReference && "".equals(((StringReference) ref).getString())) {
-                            emptyStringCount++;
+                        if (ref instanceof StringReference && "0000000000000000".equals(((StringReference) ref).getString())) {
+                            foundDummyHex = true;
                         }
                     }
                 }
-                assertTrue("Empty string not placed in testAndroidId", emptyStringCount >= 1);
+                assertTrue("Safe dummy hex not placed in testAndroidId", foundDummyHex);
             } else if ("testDebuggableProperty".equals(method.getName())) {
                 // ro.debuggable query rewritten to const-string "0"
                 boolean foundZeroString = false;
@@ -279,5 +280,97 @@ public class PrivacyBytecodeEngineTest {
         assertEquals('0', (char) out038[4]);
         assertEquals('3', (char) out038[5]);
         assertEquals('8', (char) out038[6]);
+    }
+
+    @Test
+    public void testAndroidIdPreservedInSafeStandardMode() throws Exception {
+        File dexFile = assembleSmali(PRIVACY_TARGET_SMALI);
+        DexBackedDexFile dex = DexFileFactory.loadDexFile(dexFile, Opcodes.getDefault());
+
+        ClassDef classDef = null;
+        for (ClassDef cd : dex.getClasses()) {
+            if ("Ltest/PrivacyTarget;".equals(cd.getType())) {
+                classDef = cd;
+                break;
+            }
+        }
+        assertNotNull("PrivacyTarget class not found", classDef);
+
+        PrivacyOptions standardSafe = PrivacyOptions.standard();
+        assertFalse("Safe mode must not blank android_id", standardSafe.blankAndroidId);
+
+        PrivacyStats stats = new PrivacyStats();
+        ClassDef sanitized = PrivacyBytecodeEngine.sanitizeClass(classDef, standardSafe, stats);
+
+        for (Method method : sanitized.getVirtualMethods()) {
+            if ("testAndroidId".equals(method.getName())) {
+                List<Instruction> instructions = new ArrayList<>();
+                for (Instruction inst : method.getImplementation().getInstructions()) {
+                    instructions.add(inst);
+                }
+                // In safe mode, Settings.Secure.getString MUST remain, and move-result-object must NOT be replaced with const-string
+                boolean foundMoveResult = false;
+                for (Instruction inst : instructions) {
+                    if (inst.getOpcode() == Opcode.MOVE_RESULT_OBJECT) {
+                        foundMoveResult = true;
+                    }
+                }
+                assertTrue("Safe mode must preserve original move-result-object for android_id", foundMoveResult);
+            }
+        }
+    }
+
+    @Test
+    public void testSafeIdentifierReplacementFormat() throws Exception {
+        File dexFile = assembleSmali(PRIVACY_TARGET_SMALI);
+        DexBackedDexFile dex = DexFileFactory.loadDexFile(dexFile, Opcodes.getDefault());
+
+        ClassDef classDef = null;
+        for (ClassDef cd : dex.getClasses()) {
+            if ("Ltest/PrivacyTarget;".equals(cd.getType())) {
+                classDef = cd;
+                break;
+            }
+        }
+        assertNotNull("PrivacyTarget class not found", classDef);
+
+        PrivacyOptions aggressive = PrivacyOptions.aggressive();
+        assertTrue("Aggressive mode has blankAndroidId", aggressive.blankAndroidId);
+
+        PrivacyStats stats = new PrivacyStats();
+        ClassDef sanitized = PrivacyBytecodeEngine.sanitizeClass(classDef, aggressive, stats);
+
+        for (Method method : sanitized.getVirtualMethods()) {
+            List<Instruction> instructions = new ArrayList<>();
+            for (Instruction inst : method.getImplementation().getInstructions()) {
+                instructions.add(inst);
+            }
+
+            if ("testAndroidId".equals(method.getName())) {
+                // When blanked, android_id must be 16-hex dummy '0000000000000000', NOT empty string ""
+                boolean foundValid16Hex = false;
+                for (Instruction inst : instructions) {
+                    if (inst.getOpcode() == Opcode.CONST_STRING && inst instanceof ReferenceInstruction) {
+                        Object ref = ((ReferenceInstruction) inst).getReference();
+                        if (ref instanceof StringReference && "0000000000000000".equals(((StringReference) ref).getString())) {
+                            foundValid16Hex = true;
+                        }
+                    }
+                }
+                assertTrue("Android ID when blanked must use 16-hex '0000000000000000' to prevent format crashes", foundValid16Hex);
+            } else if ("testAdvertising".equals(method.getName())) {
+                // Advertising ID must be standard zeroed UUID '00000000-0000-0000-0000-000000000000', NOT empty string ""
+                boolean foundZeroedUuid = false;
+                for (Instruction inst : instructions) {
+                    if (inst.getOpcode() == Opcode.CONST_STRING && inst instanceof ReferenceInstruction) {
+                        Object ref = ((ReferenceInstruction) inst).getReference();
+                        if (ref instanceof StringReference && "00000000-0000-0000-0000-000000000000".equals(((StringReference) ref).getString())) {
+                            foundZeroedUuid = true;
+                        }
+                    }
+                }
+                assertTrue("Ad ID must use zeroed RFC UUID '00000000-0000-0000-0000-000000000000'", foundZeroedUuid);
+            }
+        }
     }
 }

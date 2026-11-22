@@ -229,7 +229,8 @@ public final class PrivacyAuditDialog {
             new Thread(() -> {
                 try {
                     pm.setText("Sanitizing DEX bytecode...");
-                    PrivacyAuditReport auditResult = PrivacyBytecodeEngine.sanitizeApkWithAudit(apkFile, outFile, options, logger);
+                    MutationPlan mutationPlan = MutationPlan.fromThreats(report.threats, options);
+                    PrivacyAuditReport auditResult = PrivacyBytecodeEngine.sanitizeApkWithAudit(apkFile, outFile, options, null, mutationPlan, logger);
                     PrivacyStats stats = (auditResult != null && auditResult.getSanitizationStats() != null)
                             ? auditResult.getSanitizationStats()
                             : new PrivacyStats();
